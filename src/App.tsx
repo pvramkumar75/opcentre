@@ -69,8 +69,15 @@ function useDatabase<T>(table: string, initialValue: T) {
         if (error) throw error;
         setStoredValue((data as T) || initialValue);
       } catch (error) {
-        console.error('Error loading data:', error);
-        setStoredValue(initialValue);
+        console.warn(`Database not available for ${table}, using localStorage:`, error);
+        // Fallback to localStorage
+        try {
+          const item = window.localStorage.getItem(`opcenter_${table}`);
+          setStoredValue(item ? JSON.parse(item) : initialValue);
+        } catch (localError) {
+          console.error('LocalStorage fallback failed:', localError);
+          setStoredValue(initialValue);
+        }
       } finally {
         setLoading(false);
       }
@@ -82,7 +89,7 @@ function useDatabase<T>(table: string, initialValue: T) {
     const newValue = value instanceof Function ? value(storedValue) : value;
     setStoredValue(newValue);
     try {
-      // For simplicity, delete all and insert new
+      // Try database first
       await supabase.from(table).delete().neq('id', ''); // Delete all
       if (Array.isArray(newValue)) {
         await supabase.from(table).insert(newValue);
@@ -90,7 +97,13 @@ function useDatabase<T>(table: string, initialValue: T) {
         await supabase.from(table).insert(newValue);
       }
     } catch (error) {
-      console.error('Error saving data:', error);
+      console.warn(`Database save failed for ${table}, using localStorage:`, error);
+      // Fallback to localStorage
+      try {
+        window.localStorage.setItem(`opcenter_${table}`, JSON.stringify(newValue));
+      } catch (localError) {
+        console.error('LocalStorage save failed:', localError);
+      }
     }
   };
 
