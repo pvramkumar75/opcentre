@@ -1,5 +1,6 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import * as XLSX from 'xlsx';
+import { supabase } from './supabaseClient';
 import { 
   CalendarDays, 
   Layers,
@@ -56,29 +57,47 @@ interface GlobalScheduleStep {
   bottleneckReason?: string;
 }
 
-// --- PERSISTENCE HOOK ---
-function useLocalStorage<T>(key: string, initialValue: T) {
-  const [storedValue, setStoredValue] = useState<T>(() => {
-    try {
-      const item = window.localStorage.getItem(key);
-      return item ? JSON.parse(item) : initialValue;
-    } catch (error) {
-       console.error(error);
-       return initialValue;
-    }
-  });
+// --- DATABASE HOOK ---
+function useDatabase<T>(table: string, initialValue: T) {
+  const [storedValue, setStoredValue] = useState<T>(initialValue);
+  const [loading, setLoading] = useState(true);
 
-  const setValue = (value: T | ((val: T) => T)) => {
+  useEffect(() => {
+    const loadData = async () => {
+      try {
+        const { data, error } = await supabase.from(table).select('*');
+        if (error) throw error;
+        setStoredValue((data as T) || initialValue);
+      } catch (error) {
+        console.error('Error loading data:', error);
+        setStoredValue(initialValue);
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadData();
+  }, [table, initialValue]);
+
+  const setValue = async (value: T | ((val: T) => T)) => {
+    const newValue = value instanceof Function ? value(storedValue) : value;
+    setStoredValue(newValue);
     try {
-      const valueToStore = value instanceof Function ? value(storedValue) : value;
-      setStoredValue(valueToStore);
-      window.localStorage.setItem(key, JSON.stringify(valueToStore));
+      // For simplicity, delete all and insert new
+      await supabase.from(table).delete().neq('id', ''); // Delete all
+      if (Array.isArray(newValue)) {
+        await supabase.from(table).insert(newValue);
+      } else {
+        await supabase.from(table).insert(newValue);
+      }
     } catch (error) {
-      console.error(error);
+      console.error('Error saving data:', error);
     }
   };
-  return [storedValue, setValue] as const;
+
+  return [storedValue, setValue, loading] as const;
 }
+
+// --- PERSISTENCE HOOK ---
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -98,12 +117,12 @@ export default function App() {
   });
 
   // --- PERSISTENT DATABASES (State) ---
-  const [machineGroups, setMachineGroups] = useLocalStorage<MachineGroup[]>('opcenter_groups', [
+  const [machineGroups, setMachineGroups, groupsLoading] = useDatabase<MachineGroup[]>('machine_groups', [
     { id: 'GRP-EXT', name: 'Extrusion Lines' },
     { id: 'GRP-ARM', name: 'Armouring Lines' }
   ]);
 
-  const [machines, setMachines] = useLocalStorage<Machine[]>('opcenter_machines', [
+  const [machines, setMachines, machinesLoading] = useDatabase<Machine[]>('machines', [
     { id: 'STR-61', name: '61 B Stranding', maxCapacity: 50000, type: 'Conductor' },
     { id: 'EXT-70', name: 'Extruder 70mm Ins.', maxCapacity: 100000, type: 'Extrusion' },
     { id: 'DRM-TW', name: 'Drum Twister', maxCapacity: 30000, type: 'Twisting' },
@@ -112,7 +131,7 @@ export default function App() {
     { id: 'EXT-120', name: 'Extruder 120mm Jack.', maxCapacity: 40000, type: 'Extrusion' },
   ]);
 
-  const [routings, setRoutings] = useLocalStorage<Routing[]>('opcenter_routings', [
+  const [routings, setRoutings, routingsLoading] = useDatabase<Routing[]>('routings', [
     {
       id: 'PATH-001',
       name: '3C x 95 sq.mm Armoured Standard',
@@ -130,7 +149,7 @@ export default function App() {
   const defaultNextWeek = new Date();
   defaultNextWeek.setDate(defaultNextWeek.getDate() + 7);
 
-  const [workOrders, setWorkOrders] = useLocalStorage<WorkOrder[]>('opcenter_orders', [
+  const [workOrders, setWorkOrders, ordersLoading] = useDatabase<WorkOrder[]>('work_orders', [
     { id: 'WO-BHEL', cableDetails: '3C x 95 sq.mm Armoured Power', routingId: 'PATH-001', qty: 10000, startDate: new Date().toISOString().split('T')[0], dueDate: defaultNextWeek.toISOString().split('T')[0], isUrgent: false, materialStatus: 'Available', priorityNumber: 2 },
     { id: 'WO-TATA', cableDetails: '4C x 70 sq.mm Standard', routingId: 'PATH-001', qty: 15000, startDate: new Date().toISOString().split('T')[0], dueDate: defaultNextWeek.toISOString().split('T')[0], isUrgent: false, materialStatus: 'Pending', priorityNumber: 1 }
   ]);
@@ -142,39 +161,49 @@ export default function App() {
   const [newWO, setNewWO] = useState<WorkOrder>({ id: '', cableDetails: '', routingId: '', qty: 10000, startDate: new Date().toISOString().split('T')[0], dueDate: new Date((new Date()).getTime() + 7*86400000).toISOString().split('T')[0], isUrgent: false, materialStatus: 'Available', priorityNumber: 1 });
 
   // --- ACTIONS ---
-    const handleAddGroup = () => {
+    const handleAddGroup = async () => {
     if(!newGroup.id || !newGroup.name) return;
-    setMachineGroups([...machineGroups, { ...newGroup }]);
+    await setMachineGroups([...machineGroups, { ...newGroup }]);
     setNewGroup({ id: '', name: '' });
   };
-  const handleDeleteGroup = (id: string) => { setMachineGroups(machineGroups.filter(g => g.id !== id)); };
+  const handleDeleteGroup = async (id: string) => { await setMachineGroups(machineGroups.filter(g => g.id !== id)); };
 
-  const handleAddMachine = () => {
+  const handleAddMachine = async () => {
     if(!newMach.id || !newMach.name) return;
-    setMachines([...machines, { ...newMach }]);
+    await setMachines([...machines, { ...newMach }]);
     setNewMach({ id: '', name: '', maxCapacity: 10000, type: 'Extrusion', groupId: '' });
   };
-  const handleDeleteMachine = (id: string) => { setMachines(machines.filter(m => m.id !== id)); };
+  const handleDeleteMachine = async (id: string) => { await setMachines(machines.filter(m => m.id !== id)); };
 
-  const handleSaveRoute = () => {
+  const handleSaveRoute = async () => {
     if(!newRoute.id || !newRoute.name || newRoute.steps.length === 0) return;
-    setRoutings([...routings, { ...newRoute }]);
+    await setRoutings([...routings, { ...newRoute }]);
     setNewRoute({ id: '', name: '', cableType: '', coreCount: '', conductorSize: '', steps: [] });
   };
-  const handleDeleteRoute = (id: string) => { setRoutings(routings.filter(r => r.id !== id)); };
+  const handleDeleteRoute = async (id: string) => { await setRoutings(routings.filter(r => r.id !== id)); };
 
-  const handleAddWorkOrder = () => {
+  const handleAddWorkOrder = async () => {
     if(!newWO.id || !newWO.cableDetails || !newWO.routingId) return;
-    setWorkOrders([...workOrders, { ...newWO }]);
+    await setWorkOrders([...workOrders, { ...newWO }]);
     setNewWO({ id: '', cableDetails: '', routingId: '', qty: 10000, startDate: new Date().toISOString().split('T')[0], dueDate: new Date((new Date()).getTime() + 7*86400000).toISOString().split('T')[0], isUrgent: false, materialStatus: 'Available', priorityNumber: 1 });
   };
-  const handleDeleteWorkOrder = (id: string) => { setWorkOrders(workOrders.filter(o => o.id !== id)); };
+  const handleDeleteWorkOrder = async (id: string) => { await setWorkOrders(workOrders.filter(o => o.id !== id)); };
 
-  const simulateERPSync = () => {
+  const simulateERPSync = async () => {
     const updated = workOrders.map(wo => wo.materialStatus === 'Pending' ? { ...wo, materialStatus: 'Available' as 'Available' } : wo);
-    setWorkOrders(updated);
+    await setWorkOrders(updated);
     alert('ERP Sync Simulated: All pending materials are now marked as available.');
   };
+
+  const isLoading = groupsLoading || machinesLoading || routingsLoading || ordersLoading;
+
+  if (isLoading) {
+    return (
+      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: 'var(--bg-primary)', color: 'white' }}>
+        <div>Loading data from database...</div>
+      </div>
+    );
+  }
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
