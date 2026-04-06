@@ -1,7 +1,6 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import * as XLSX from 'xlsx';
-import { supabase } from './supabaseClient';
-import { 
+import {
   CalendarDays, 
   Layers,
   ArrowRight,
@@ -42,6 +41,7 @@ interface WorkOrder {
   dueDate: string; 
   isUrgent: boolean; 
   materialStatus: 'Available' | 'Pending';
+  includeInSchedule: boolean;
   priorityNumber?: number;
 }
 interface GlobalScheduleStep {
@@ -57,57 +57,29 @@ interface GlobalScheduleStep {
   bottleneckReason?: string;
 }
 
-// --- DATABASE HOOK ---
-function useDatabase<T>(table: string, initialValue: T) {
-  const [storedValue, setStoredValue] = useState<T>(initialValue);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const loadData = async () => {
-      try {
-        const { data, error } = await supabase.from(table).select('*');
-        if (error) throw error;
-        setStoredValue((data as T) || initialValue);
-      } catch (error) {
-        console.warn(`Database not available for ${table}, using localStorage:`, error);
-        // Fallback to localStorage
-        try {
-          const item = window.localStorage.getItem(`opcenter_${table}`);
-          setStoredValue(item ? JSON.parse(item) : initialValue);
-        } catch (localError) {
-          console.error('LocalStorage fallback failed:', localError);
-          setStoredValue(initialValue);
-        }
-      } finally {
-        setLoading(false);
-      }
-    };
-    loadData();
-  }, [table, initialValue]);
-
-  const setValue = async (value: T | ((val: T) => T)) => {
-    const newValue = value instanceof Function ? value(storedValue) : value;
-    setStoredValue(newValue);
+// --- PERSISTENCE HOOK ---
+function useLocalStorage<T>(key: string, initialValue: T) {
+  const [storedValue, setStoredValue] = useState<T>(() => {
     try {
-      // Try database first
-      await supabase.from(table).delete().neq('id', ''); // Delete all
-      if (Array.isArray(newValue)) {
-        await supabase.from(table).insert(newValue);
-      } else {
-        await supabase.from(table).insert(newValue);
-      }
+      const item = window.localStorage.getItem(key);
+      return item ? JSON.parse(item) : initialValue;
     } catch (error) {
-      console.warn(`Database save failed for ${table}, using localStorage:`, error);
-      // Fallback to localStorage
-      try {
-        window.localStorage.setItem(`opcenter_${table}`, JSON.stringify(newValue));
-      } catch (localError) {
-        console.error('LocalStorage save failed:', localError);
-      }
+      console.error(error);
+      return initialValue;
+    }
+  });
+
+  const setValue = (value: T | ((val: T) => T)) => {
+    try {
+      const valueToStore = value instanceof Function ? value(storedValue) : value;
+      setStoredValue(valueToStore);
+      window.localStorage.setItem(key, JSON.stringify(valueToStore));
+    } catch (error) {
+      console.error(error);
     }
   };
 
-  return [storedValue, setValue, loading] as const;
+  return [storedValue, setValue] as const;
 }
 
 // --- PERSISTENCE HOOK ---
@@ -130,12 +102,12 @@ export default function App() {
   });
 
   // --- PERSISTENT DATABASES (State) ---
-  const [machineGroups, setMachineGroups, groupsLoading] = useDatabase<MachineGroup[]>('machine_groups', [
+  const [machineGroups, setMachineGroups] = useLocalStorage<MachineGroup[]>('opcenter_groups', [
     { id: 'GRP-EXT', name: 'Extrusion Lines' },
     { id: 'GRP-ARM', name: 'Armouring Lines' }
   ]);
 
-  const [machines, setMachines, machinesLoading] = useDatabase<Machine[]>('machines', [
+  const [machines, setMachines] = useLocalStorage<Machine[]>('opcenter_machines', [
     { id: 'STR-61', name: '61 B Stranding', maxCapacity: 50000, type: 'Conductor' },
     { id: 'EXT-70', name: 'Extruder 70mm Ins.', maxCapacity: 100000, type: 'Extrusion' },
     { id: 'DRM-TW', name: 'Drum Twister', maxCapacity: 30000, type: 'Twisting' },
@@ -144,7 +116,7 @@ export default function App() {
     { id: 'EXT-120', name: 'Extruder 120mm Jack.', maxCapacity: 40000, type: 'Extrusion' },
   ]);
 
-  const [routings, setRoutings, routingsLoading] = useDatabase<Routing[]>('routings', [
+  const [routings, setRoutings] = useLocalStorage<Routing[]>('opcenter_routings', [
     {
       id: 'PATH-001',
       name: '3C x 95 sq.mm Armoured Standard',
@@ -162,61 +134,51 @@ export default function App() {
   const defaultNextWeek = new Date();
   defaultNextWeek.setDate(defaultNextWeek.getDate() + 7);
 
-  const [workOrders, setWorkOrders, ordersLoading] = useDatabase<WorkOrder[]>('work_orders', [
-    { id: 'WO-BHEL', cableDetails: '3C x 95 sq.mm Armoured Power', routingId: 'PATH-001', qty: 10000, startDate: new Date().toISOString().split('T')[0], dueDate: defaultNextWeek.toISOString().split('T')[0], isUrgent: false, materialStatus: 'Available', priorityNumber: 2 },
-    { id: 'WO-TATA', cableDetails: '4C x 70 sq.mm Standard', routingId: 'PATH-001', qty: 15000, startDate: new Date().toISOString().split('T')[0], dueDate: defaultNextWeek.toISOString().split('T')[0], isUrgent: false, materialStatus: 'Pending', priorityNumber: 1 }
+  const [workOrders, setWorkOrders] = useLocalStorage<WorkOrder[]>('opcenter_orders', [
+    { id: 'WO-BHEL', cableDetails: '3C x 95 sq.mm Armoured Power', routingId: 'PATH-001', qty: 10000, startDate: new Date().toISOString().split('T')[0], dueDate: defaultNextWeek.toISOString().split('T')[0], isUrgent: false, materialStatus: 'Available', includeInSchedule: true, priorityNumber: 2 },
+    { id: 'WO-TATA', cableDetails: '4C x 70 sq.mm Standard', routingId: 'PATH-001', qty: 15000, startDate: new Date().toISOString().split('T')[0], dueDate: defaultNextWeek.toISOString().split('T')[0], isUrgent: false, materialStatus: 'Pending', includeInSchedule: true, priorityNumber: 1 }
   ]);
 
   // --- FORM STATES ---
   const [newGroup, setNewGroup] = useState<MachineGroup>({ id: '', name: '' });
   const [newMach, setNewMach] = useState<Machine>({ id: '', name: '', maxCapacity: 10000, type: 'Extrusion', groupId: '' });
   const [newRoute, setNewRoute] = useState<Routing>({ id: '', name: '', cableType: '', coreCount: '', conductorSize: '', steps: [] });
-  const [newWO, setNewWO] = useState<WorkOrder>({ id: '', cableDetails: '', routingId: '', qty: 10000, startDate: new Date().toISOString().split('T')[0], dueDate: new Date((new Date()).getTime() + 7*86400000).toISOString().split('T')[0], isUrgent: false, materialStatus: 'Available', priorityNumber: 1 });
+  const [newWO, setNewWO] = useState<WorkOrder>({ id: '', cableDetails: '', routingId: '', qty: 10000, startDate: new Date().toISOString().split('T')[0], dueDate: new Date((new Date()).getTime() + 7*86400000).toISOString().split('T')[0], isUrgent: false, materialStatus: 'Available', includeInSchedule: true, priorityNumber: 1 });
 
   // --- ACTIONS ---
-    const handleAddGroup = async () => {
+    const handleAddGroup = () => {
     if(!newGroup.id || !newGroup.name) return;
-    await setMachineGroups([...machineGroups, { ...newGroup }]);
+    setMachineGroups([...machineGroups, { ...newGroup }]);
     setNewGroup({ id: '', name: '' });
   };
-  const handleDeleteGroup = async (id: string) => { await setMachineGroups(machineGroups.filter(g => g.id !== id)); };
+  const handleDeleteGroup = (id: string) => { setMachineGroups(machineGroups.filter(g => g.id !== id)); };
 
-  const handleAddMachine = async () => {
+  const handleAddMachine = () => {
     if(!newMach.id || !newMach.name) return;
-    await setMachines([...machines, { ...newMach }]);
+    setMachines([...machines, { ...newMach }]);
     setNewMach({ id: '', name: '', maxCapacity: 10000, type: 'Extrusion', groupId: '' });
   };
-  const handleDeleteMachine = async (id: string) => { await setMachines(machines.filter(m => m.id !== id)); };
+  const handleDeleteMachine = (id: string) => { setMachines(machines.filter(m => m.id !== id)); };
 
-  const handleSaveRoute = async () => {
+  const handleSaveRoute = () => {
     if(!newRoute.id || !newRoute.name || newRoute.steps.length === 0) return;
-    await setRoutings([...routings, { ...newRoute }]);
+    setRoutings([...routings, { ...newRoute }]);
     setNewRoute({ id: '', name: '', cableType: '', coreCount: '', conductorSize: '', steps: [] });
   };
-  const handleDeleteRoute = async (id: string) => { await setRoutings(routings.filter(r => r.id !== id)); };
+  const handleDeleteRoute = (id: string) => { setRoutings(routings.filter(r => r.id !== id)); };
 
-  const handleAddWorkOrder = async () => {
+  const handleAddWorkOrder = () => {
     if(!newWO.id || !newWO.cableDetails || !newWO.routingId) return;
-    await setWorkOrders([...workOrders, { ...newWO }]);
-    setNewWO({ id: '', cableDetails: '', routingId: '', qty: 10000, startDate: new Date().toISOString().split('T')[0], dueDate: new Date((new Date()).getTime() + 7*86400000).toISOString().split('T')[0], isUrgent: false, materialStatus: 'Available', priorityNumber: 1 });
+    setWorkOrders([...workOrders, { ...newWO }]);
+    setNewWO({ id: '', cableDetails: '', routingId: '', qty: 10000, startDate: new Date().toISOString().split('T')[0], dueDate: new Date((new Date()).getTime() + 7*86400000).toISOString().split('T')[0], isUrgent: false, materialStatus: 'Available', includeInSchedule: true, priorityNumber: 1 });
   };
-  const handleDeleteWorkOrder = async (id: string) => { await setWorkOrders(workOrders.filter(o => o.id !== id)); };
+  const handleDeleteWorkOrder = (id: string) => { setWorkOrders(workOrders.filter(o => o.id !== id)); };
 
-  const simulateERPSync = async () => {
+  const simulateERPSync = () => {
     const updated = workOrders.map(wo => wo.materialStatus === 'Pending' ? { ...wo, materialStatus: 'Available' as 'Available' } : wo);
-    await setWorkOrders(updated);
+    setWorkOrders(updated);
     alert('ERP Sync Simulated: All pending materials are now marked as available.');
   };
-
-  const isLoading = groupsLoading || machinesLoading || routingsLoading || ordersLoading;
-
-  if (isLoading) {
-    return (
-      <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', background: 'var(--bg-primary)', color: 'white' }}>
-        <div>Loading data from database...</div>
-      </div>
-    );
-  }
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -321,6 +283,7 @@ export default function App() {
                 dueDate:   toISODate(getCol(row, 'delivery deadline', 'delivery', 'due')),
                 isUrgent:  toUrgent(getCol(row, 'prioritize', 'urgent')),
                 materialStatus: toStatus(matState),
+                includeInSchedule: true,
                 priorityNumber: Number(getCol(row, 'priority number', 'priority')) || 999
             });
         });
@@ -337,7 +300,7 @@ export default function App() {
 
 
   const executeSchedule = () => {
-    const sortedWOs = [...workOrders].filter(wo => wo.materialStatus !== 'Pending');
+    const sortedWOs = [...workOrders].filter(wo => wo.materialStatus !== 'Pending' && wo.includeInSchedule);
     sortedWOs.sort((a, b) => {
         if (a.isUrgent && !b.isUrgent) return -1;
         if (!a.isUrgent && b.isUrgent) return 1;
@@ -1399,6 +1362,7 @@ export default function App() {
                <table style={{ width: '100%', textAlign: 'left', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
                  <thead>
                    <tr style={{ borderBottom: '1px solid var(--border-glass)' }}>
+                     <th style={{ padding: '12px 8px', color: 'var(--text-secondary)' }}>Include</th>
                      <th style={{ padding: '12px 8px', color: 'var(--text-secondary)' }}>Order #</th>
                      <th style={{ padding: '12px 8px', color: 'var(--text-secondary)' }}>Path</th>
                      <th style={{ padding: '12px 8px', color: 'var(--text-secondary)' }}>Status</th>
@@ -1411,6 +1375,11 @@ export default function App() {
                  <tbody>
                    {workOrders.map(wo => (
                      <tr key={wo.id} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)', background: wo.isUrgent ? 'rgba(225, 29, 72, 0.1)' : 'transparent', borderLeft: wo.isUrgent ? '3px solid #e11d48' : 'none' }}>
+                       <td style={{ padding: '12px 8px' }}>
+                         <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer' }}>
+                           <input type="checkbox" checked={wo.includeInSchedule} onChange={e => setWorkOrders(workOrders.map(item => item.id === wo.id ? { ...item, includeInSchedule: e.target.checked } : item))} style={{ width: '16px', height: '16px' }} />
+                         </label>
+                       </td>
                        <td style={{ padding: '12px 8px', color: 'var(--accent-cyan)' }}>{wo.id}</td>
                        <td style={{ padding: '12px 8px' }}>
                          {(() => {
@@ -1474,6 +1443,10 @@ export default function App() {
                      </select>
                    </div>
                  </div>
+                 <label style={{ display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', padding: '12px', background: 'rgba(255,255,255,0.05)', borderRadius: '6px' }}>
+                   <input type="checkbox" checked={newWO.includeInSchedule} onChange={e=>setNewWO({...newWO, includeInSchedule: e.target.checked})} style={{ width: '16px', height: '16px' }} />
+                   <span>Include this work order in schedule execution</span>
+                 </label>
 
                   <div>
                     <label style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>Target Quantity (Meters)</label>
